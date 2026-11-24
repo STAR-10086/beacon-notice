@@ -6,6 +6,7 @@ const cors = require('cors');
 const multer = require('multer');
 
 const PORT = Number(process.env.PORT || 3080);
+const ADMIN_PORT = Number(process.env.ADMIN_PORT || 3081);
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(__dirname, '..', 'data'));
 const PUBLIC_DIR = path.resolve(process.env.PUBLIC_DIR || path.join(__dirname, '..', 'public'));
 const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
@@ -105,88 +106,106 @@ const upload = multer({
   }
 });
 
-const app = express();
-app.disable('x-powered-by');
-app.set('trust proxy', true);
-
 const corsOrigins = CORS_ORIGIN === '*'
   ? '*'
   : CORS_ORIGIN.split(',').map((s) => s.trim()).filter(Boolean);
 
-app.use(cors({
-  origin: corsOrigins,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
-}));
-app.use(express.json({ limit: '1mb' }));
+function createBaseApp() {
+  const instance = express();
+  instance.disable('x-powered-by');
+  instance.set('trust proxy', true);
+  instance.use(cors({
+    origin: corsOrigins,
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization']
+  }));
+  instance.use(express.json({ limit: '1mb' }));
+  return instance;
+}
 
-app.get('/health', (_req, res) => {
-  res.json({ ok: true, service: 'beacon-notice', timestamp: Date.now() });
+function registerPublicRoutes(targetApp) {
+  targetApp.get('/health', (_req, res) => {
+    res.json({ ok: true, service: 'beacon-notice', timestamp: Date.now() });
+  });
+
+  targetApp.get('/uploads/:filename', (req, res) => {
+    const filename = path.basename(req.params.filename || '');
+    if (!/^[a-zA-Z0-9._-]+$/.test(filename)) {
+      return res.status(400).json({ error: 'Invalid filename' });
+    }
+    const filePath = path.join(UPLOADS_DIR, filename);
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ error: 'Not found' });
+    }
+    res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+    res.sendFile(filePath);
+  });
+
+  targetApp.get('/api/notices', (req, res) => {
+    const appId = String(req.query.app || '').trim();
+    const versionCodeRaw = req.query.versionCode;
+    const versionCode = versionCodeRaw !== undefined && versionCodeRaw !== ''
+      ? Number(versionCodeRaw)
+      : null;
+    const now = Date.now();
+
+    const list = readNotices()
+      .filter((n) => {
+        if (!n.enabled) return false;
+        if (n.expiresAt && Number(n.expiresAt) > 0 && Number(n.expiresAt) <= now) return false;
+        if (appId) {
+          if (n.appId !== appId && n.appId !== '*') return false;
+        }
+        if (versionCode !== null && !Number.isNaN(versionCode)) {
+          const minV = Number(n.minVersionCode || 0);
+          const maxV = Number(n.maxVersionCode || 0);
+          if (minV > 0 && versionCode < minV) return false;
+          if (maxV > 0 && versionCode > maxV) return false;
+        }
+        return true;
+      })
+      .sort((a, b) => {
+        if (Boolean(a.pinned) !== Boolean(b.pinned)) return a.pinned ? -1 : 1;
+        return Number(b.publishedAt || 0) - Number(a.publishedAt || 0);
+      })
+      .map((n) => ({
+        id: n.id,
+        appId: n.appId,
+        title: n.title,
+        summary: n.summary || '',
+        markdown: n.markdown || '',
+        level: n.level || 'info',
+        popup: Boolean(n.popup),
+        pinned: Boolean(n.pinned),
+        dismissible: n.dismissible !== false,
+        actionText: n.actionText || '',
+        actionUrl: n.actionUrl || '',
+        minVersionCode: Number(n.minVersionCode || 0),
+        maxVersionCode: Number(n.maxVersionCode || 0),
+        publishedAt: Number(n.publishedAt || 0),
+        expiresAt: n.expiresAt ? Number(n.expiresAt) : null
+      }));
+
+    res.setHeader('Cache-Control', 'public, max-age=60');
+    res.json({ notices: list, serverTime: now });
+  });
+}
+
+// 1) Public-only server (for SaaS-accelerated user domain like notice.buct.one)
+const publicApp = createBaseApp();
+registerPublicRoutes(publicApp);
+publicApp.use((_req, res) => {
+  res.status(404).json({ error: 'Not found' });
+});
+publicApp.use((err, _req, res, _next) => {
+  res.status(400).json({ error: err.message || 'Request failed' });
 });
 
-app.get('/uploads/:filename', (req, res) => {
-  const filename = path.basename(req.params.filename || '');
-  if (!/^[a-zA-Z0-9._-]+$/.test(filename)) {
-    return res.status(400).json({ error: 'Invalid filename' });
-  }
-  const filePath = path.join(UPLOADS_DIR, filename);
-  if (!fs.existsSync(filePath)) {
-    return res.status(404).json({ error: 'Not found' });
-  }
-  res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
-  res.sendFile(filePath);
-});
+// 2) Admin + SPA server (for Zero Trust protected admin domain like notice.star10086qaq.pp.ua)
+const adminApp = createBaseApp();
+registerPublicRoutes(adminApp);
 
-app.get('/api/notices', (req, res) => {
-  const appId = String(req.query.app || '').trim();
-  const versionCodeRaw = req.query.versionCode;
-  const versionCode = versionCodeRaw !== undefined && versionCodeRaw !== ''
-    ? Number(versionCodeRaw)
-    : null;
-  const now = Date.now();
-
-  const list = readNotices()
-    .filter((n) => {
-      if (!n.enabled) return false;
-      if (n.expiresAt && Number(n.expiresAt) > 0 && Number(n.expiresAt) <= now) return false;
-      if (appId) {
-        if (n.appId !== appId && n.appId !== '*') return false;
-      }
-      if (versionCode !== null && !Number.isNaN(versionCode)) {
-        const minV = Number(n.minVersionCode || 0);
-        const maxV = Number(n.maxVersionCode || 0);
-        if (minV > 0 && versionCode < minV) return false;
-        if (maxV > 0 && versionCode > maxV) return false;
-      }
-      return true;
-    })
-    .sort((a, b) => {
-      if (Boolean(a.pinned) !== Boolean(b.pinned)) return a.pinned ? -1 : 1;
-      return Number(b.publishedAt || 0) - Number(a.publishedAt || 0);
-    })
-    .map((n) => ({
-      id: n.id,
-      appId: n.appId,
-      title: n.title,
-      summary: n.summary || '',
-      markdown: n.markdown || '',
-      level: n.level || 'info',
-      popup: Boolean(n.popup),
-      pinned: Boolean(n.pinned),
-      dismissible: n.dismissible !== false,
-      actionText: n.actionText || '',
-      actionUrl: n.actionUrl || '',
-      minVersionCode: Number(n.minVersionCode || 0),
-      maxVersionCode: Number(n.maxVersionCode || 0),
-      publishedAt: Number(n.publishedAt || 0),
-      expiresAt: n.expiresAt ? Number(n.expiresAt) : null
-    }));
-
-  res.setHeader('Cache-Control', 'public, max-age=60');
-  res.json({ notices: list, serverTime: now });
-});
-
-app.get('/api/admin/me', requireAdmin, (req, res) => {
+adminApp.get('/api/admin/me', requireAdmin, (req, res) => {
   res.json({
     ok: true,
     identity: req.adminIdentity || 'unknown',
@@ -194,7 +213,7 @@ app.get('/api/admin/me', requireAdmin, (req, res) => {
   });
 });
 
-app.get('/api/admin/apps', requireAdmin, (_req, res) => {
+adminApp.get('/api/admin/apps', requireAdmin, (_req, res) => {
   const notices = readNotices();
   const counts = new Map();
   for (const n of notices) {
@@ -205,7 +224,7 @@ app.get('/api/admin/apps', requireAdmin, (_req, res) => {
   res.json({ apps });
 });
 
-app.get('/api/admin/notices', requireAdmin, (req, res) => {
+adminApp.get('/api/admin/notices', requireAdmin, (req, res) => {
   const filterApp = String(req.query.app || '').trim();
   let list = readNotices();
   if (filterApp && filterApp !== '__all__') {
@@ -248,7 +267,7 @@ function sanitizeNoticePayload(body, existing = null) {
   };
 }
 
-app.post('/api/admin/notices', requireAdmin, (req, res) => {
+adminApp.post('/api/admin/notices', requireAdmin, (req, res) => {
   try {
     const notices = readNotices();
     const created = sanitizeNoticePayload(req.body || {});
@@ -260,7 +279,7 @@ app.post('/api/admin/notices', requireAdmin, (req, res) => {
   }
 });
 
-app.put('/api/admin/notices/:id', requireAdmin, (req, res) => {
+adminApp.put('/api/admin/notices/:id', requireAdmin, (req, res) => {
   try {
     const notices = readNotices();
     const idx = notices.findIndex((n) => n.id === req.params.id);
@@ -276,7 +295,7 @@ app.put('/api/admin/notices/:id', requireAdmin, (req, res) => {
   }
 });
 
-app.delete('/api/admin/notices/:id', requireAdmin, (req, res) => {
+adminApp.delete('/api/admin/notices/:id', requireAdmin, (req, res) => {
   const notices = readNotices();
   const next = notices.filter((n) => n.id !== req.params.id);
   if (next.length === notices.length) {
@@ -286,7 +305,7 @@ app.delete('/api/admin/notices/:id', requireAdmin, (req, res) => {
   res.json({ ok: true });
 });
 
-app.post('/api/admin/upload', requireAdmin, upload.single('file'), (req, res) => {
+adminApp.post('/api/admin/upload', requireAdmin, upload.single('file'), (req, res) => {
   if (!req.file) {
     return res.status(400).json({ error: 'No image file provided' });
   }
@@ -299,17 +318,23 @@ app.post('/api/admin/upload', requireAdmin, upload.single('file'), (req, res) =>
 });
 
 if (fs.existsSync(PUBLIC_DIR)) {
-  app.get('/', (_req, res) => res.redirect(302, '/admin/'));
-  app.use('/admin', express.static(PUBLIC_DIR, { index: 'index.html' }));
-  app.get('/admin/*', (_req, res) => {
-    res.sendFile(path.join(PUBLIC_DIR, 'index.html'));
+  adminApp.use('/', express.static(PUBLIC_DIR, { index: 'index.html' }));
+  adminApp.get('*', (req, res, next) => {
+    if (req.path.startsWith('/api/') || req.path.startsWith('/uploads/')) {
+      return next();
+    }
+    return res.sendFile(path.join(PUBLIC_DIR, 'index.html'));
   });
 }
 
-app.use((err, _req, res, _next) => {
+adminApp.use((err, _req, res, _next) => {
   res.status(400).json({ error: err.message || 'Request failed' });
 });
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`[beacon-notice] listening on 0.0.0.0:${PORT}, data=${DATA_DIR}`);
+publicApp.listen(PORT, '0.0.0.0', () => {
+  console.log(`[beacon-notice] public server listening on 0.0.0.0:${PORT}, data=${DATA_DIR}`);
+});
+
+adminApp.listen(ADMIN_PORT, '0.0.0.0', () => {
+  console.log(`[beacon-notice] admin server listening on 0.0.0.0:${ADMIN_PORT}, public=${PUBLIC_DIR}`);
 });

@@ -6,9 +6,13 @@ services:
     container_name: beacon-notice
     restart: unless-stopped
     ports:
+      # 公开只读端口：仅开放 /api/notices、/uploads/*、/health（供 notice.buct.one SaaS 优选回源）
       - "127.0.0.1:3080:3080"
+      # 管理后台端口：托管 React 管理端与 /api/admin/*（供 notice.star10086qaq.pp.ua + Zero Trust 整站保护）
+      - "127.0.0.1:3081:3081"
     environment:
       PORT: 3080
+      ADMIN_PORT: 3081
       DATA_DIR: /data
       PUBLIC_DIR: /app/public
       TRUST_CF_ACCESS: ${TRUST_CF_ACCESS:-true}

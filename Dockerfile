@@ -20,10 +20,11 @@ COPY --from=web-builder /web/dist ./public
 
 ENV NODE_ENV=production \
     PORT=3080 \
+    ADMIN_PORT=3081 \
     DATA_DIR=/data \
     PUBLIC_DIR=/app/public
 
 VOLUME ["/data"]
-EXPOSE 3080
+EXPOSE 3080 3081
 
 CMD ["node", "src/index.js"]

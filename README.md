@@ -1,8 +1,10 @@
 # Beacon Notice
 
 面向独立开发者的**轻量多应用 Markdown 与图文公告系统**：
-- **单容器全合一（`server/` + `web/`）**：Node.js + Express 托管 `/api/*`、上传图片 `/uploads/*` 以及构建后的 React 管理后台 `/admin`，JSON 原子落盘，零外部数据库依赖；
-- **零公网端口暴露**：仅绑定 `127.0.0.1:3080`，通过宿主机 **Cloudflare Tunnel** 反代，并配合 **Cloudflare Zero Trust Access** 实现管理后台免密登录；
+- **单容器双端口物理隔离**：
+  - **公开只读端口 `3080`**：仅提供 `/api/notices`、`/uploads/*`、`/health`，其余路径一律 `404`（适合对接 Cloudflare for SaaS 优选域名，如 `notice.buct.one`）；
+  - **独立管理端口 `3081`**：托管 React 管理后台（`/`）与 `/api/admin/*`，配合 Cloudflare Zero Trust 整站保护（如 `notice.star10086qaq.pp.ua`）；
+- **零公网端口暴露**：两个端口均只绑定 `127.0.0.1`，由宿主机 **Cloudflare Tunnel** 反代；
 - **核心能力**：多应用隔离（含 `*` 全局广播）、Markdown 左右分栏实时预览、截图粘贴 / 拖拽 / 按钮上传图片、定时过期、启动弹窗与版本号定向投放。
 
 ---
@@ -17,34 +19,42 @@ cp .env.example .env
 docker compose up -d --build
 ```
 
-验证本机服务：
+验证本机双端口服务：
 
 ```bash
 curl http://127.0.0.1:3080/health
+curl http://127.0.0.1:3081/health
 ```
 
 ---
 
-## 二、Cloudflare Tunnel 与 Zero Trust Access 配置（以 `notice.buct.one` 为例）
+## 二、Cloudflare Tunnel、SaaS 优选与 Zero Trust 配置
 
-1. **Cloudflare Tunnel（Public Hostname）**：
-   - Domain：`notice.buct.one`
-   - Service：`HTTP` → `http://127.0.0.1:3080`
-2. **Cloudflare Zero Trust → Access → Applications（Self-hosted）**：
-   - 仅保护管理后台与管理接口，创建两条路径（或两个 Application）：
-     - `notice.buct.one/admin*`
-     - `notice.buct.one/api/admin/*`
-   - Policy：`Allow`，规则选 `Emails` 填入你自己的邮箱（与 `.env` 中 `CF_ACCESS_ALLOWED_EMAILS` 一致）。
-   - **不要**把 `/api/notices` 与 `/uploads/*` 放进 Access 保护，确保客户端 App 可以公开拉取公告与图片。
-3. **打开后台**：
-   - 浏览器访问 `https://notice.buct.one/admin`，通过 Cloudflare 邮箱验证码登录后即可直接进入编辑器，无需再输入 Token。
-   - 如需在本地无 Zero Trust 环境下调试，可在 `.env` 中设置 `ADMIN_TOKEN`，后台会自动在 401 时回退展示 Token 登录框。
+### 1. Cloudflare Tunnel（Public Hostname）
+
+在 Tunnel 中添加两条指向本机不同端口的记录：
+
+- **管理端域名**：`notice.star10086qaq.pp.ua` → `HTTP` `127.0.0.1:3081`
+- **用户端回源域名**（供 `notice.buct.one` CNAME / SaaS 优选回源）：如 `notice-origin.star10086qaq.pp.ua`（或直接 `notice.buct.one`）→ `HTTP` `127.0.0.1:3080`
+
+> 端口 `3080` 上物理不存在任何 `/api/admin/*` 与管理页面路由，即使 SaaS 优选改写回源 Host 也绝对不会暴露管理接口。
+
+### 2. Cloudflare Zero Trust → Access → Applications（Self-hosted）
+
+直接对整个管理域名 `notice.star10086qaq.pp.ua` 开启保护（无需写路径规则）：
+- **Domain**：`notice.star10086qaq.pp.ua`（Path 留空即可）
+- **Policy**：`Allow`，规则选 `Emails` 填入你的邮箱（与 `.env` 中 `CF_ACCESS_ALLOWED_EMAILS` 一致）
+
+### 3. 登录后台与图片链接
+
+- 浏览器直接访问 `https://notice.star10086qaq.pp.ua`，通过 Cloudflare 邮箱验证码后即可免密进入管理后台；
+- 上传图片会自动按 `PUBLIC_BASE_URL`（如 `https://notice.buct.one`）生成公网加速链接，App 端拉取公告和图片全部走 `notice.buct.one` 优选节点。
 
 ---
 
 ## 三、接口说明
 
-### 1. 客户端只读接口（公开）
+### 1. 客户端只读接口（公开，端口 `3080`）
 
 ```http
 GET https://notice.buct.one/api/notices?app=buct-one&versionCode=11
@@ -80,7 +90,7 @@ GET https://notice.buct.one/api/notices?app=buct-one&versionCode=11
 - `appId = "*"` 表示全局广播，所有应用均可收到；
 - `minVersionCode` / `maxVersionCode` 为 `0` 表示不限制版本。
 
-### 2. 管理接口（受 Zero Trust 或 Bearer Token 保护）
+### 2. 管理接口（仅端口 `3081`，受 Zero Trust 或 Bearer Token 保护）
 
 - `GET /api/admin/me`：返回当前鉴权方式与登录邮箱
 - `GET /api/admin/notices`：获取全部公告（含未生效/已过期）
