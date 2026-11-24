@@ -1,66 +1,50 @@
 # Beacon Notice
 
 面向独立开发者的**轻量多应用 Markdown 与图文公告系统**：
-- **后端（`server/`）**：Node.js + Express + Docker（单容器、JSON 原子落盘 + 本地图片上传托管，零外部数据库依赖），适合直接部署在已有 VPS 上；
-- **管理后台（`web/`）**：Vite + React（部署在 Vercel），支持多应用隔离、Markdown 左右分栏实时预览、截图粘贴 / 拖拽 / 按钮上传图片、定时过期、启动弹窗与版本号定向投放。
+- **单容器全合一（`server/` + `web/`）**：Node.js + Express 托管 `/api/*`、上传图片 `/uploads/*` 以及构建后的 React 管理后台 `/admin`，JSON 原子落盘，零外部数据库依赖；
+- **零公网端口暴露**：仅绑定 `127.0.0.1:3080`，通过宿主机 **Cloudflare Tunnel** 反代，并配合 **Cloudflare Zero Trust Access** 实现管理后台免密登录；
+- **核心能力**：多应用隔离（含 `*` 全局广播）、Markdown 左右分栏实时预览、截图粘贴 / 拖拽 / 按钮上传图片、定时过期、启动弹窗与版本号定向投放。
 
 ---
 
-## 一、VPS 一键 Docker 部署（后端）
+## 一、VPS 一键 Docker 部署
 
 ```bash
 git clone https://github.com/STAR-10086/beacon-notice.git
 cd beacon-notice
 cp .env.example .env
-# 编辑 .env，设置强随机 ADMIN_TOKEN 与 PUBLIC_BASE_URL（如 https://notice.buct.one）
+# 编辑 .env，设置 CF_ACCESS_ALLOWED_EMAILS 与 PUBLIC_BASE_URL（如 https://notice.buct.one）
 docker compose up -d --build
 ```
 
-验证服务：
+验证本机服务：
 
 ```bash
 curl http://127.0.0.1:3080/health
 ```
 
-### Nginx / Caddy 反向代理示例（以 `notice.buct.one` 为例）
+---
 
-**Caddy：**
-```caddyfile
-notice.buct.one {
-    reverse_proxy 127.0.0.1:3080
-}
-```
+## 二、Cloudflare Tunnel 与 Zero Trust Access 配置（以 `notice.buct.one` 为例）
 
-**Nginx：**
-```nginx
-server {
-    listen 443 ssl http2;
-    server_name notice.buct.one;
-    client_max_body_size 10m;
-
-    location / {
-        proxy_pass http://127.0.0.1:3080;
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header X-Real-IP $remote_addr;
-    }
-}
-```
+1. **Cloudflare Tunnel（Public Hostname）**：
+   - Domain：`notice.buct.one`
+   - Service：`HTTP` → `http://127.0.0.1:3080`
+2. **Cloudflare Zero Trust → Access → Applications（Self-hosted）**：
+   - 仅保护管理后台与管理接口，创建两条路径（或两个 Application）：
+     - `notice.buct.one/admin*`
+     - `notice.buct.one/api/admin/*`
+   - Policy：`Allow`，规则选 `Emails` 填入你自己的邮箱（与 `.env` 中 `CF_ACCESS_ALLOWED_EMAILS` 一致）。
+   - **不要**把 `/api/notices` 与 `/uploads/*` 放进 Access 保护，确保客户端 App 可以公开拉取公告与图片。
+3. **打开后台**：
+   - 浏览器访问 `https://notice.buct.one/admin`，通过 Cloudflare 邮箱验证码登录后即可直接进入编辑器，无需再输入 Token。
+   - 如需在本地无 Zero Trust 环境下调试，可在 `.env` 中设置 `ADMIN_TOKEN`，后台会自动在 401 时回退展示 Token 登录框。
 
 ---
 
-## 二、Vercel 部署（Markdown 管理后台）
+## 三、接口说明
 
-1. 在 Vercel 导入本仓库；
-2. **Root Directory** 选择 `web`；
-3. Framework Preset 选择 `Vite`，Build Command `npm run build`，Output Directory `dist`；
-4. 部署完成后打开页面，填入后端地址（如 `https://notice.buct.one`）与 `.env` 中的 `ADMIN_TOKEN` 即可直接发布带图 Markdown 公告。
-
----
-
-## 三、客户端通用接口约定
-
-任何 App（Android / iOS / Desktop / Web）只需请求一个只读接口即可接入：
+### 1. 客户端只读接口（公开）
 
 ```http
 GET https://notice.buct.one/api/notices?app=buct-one&versionCode=11
@@ -95,3 +79,12 @@ GET https://notice.buct.one/api/notices?app=buct-one&versionCode=11
 
 - `appId = "*"` 表示全局广播，所有应用均可收到；
 - `minVersionCode` / `maxVersionCode` 为 `0` 表示不限制版本。
+
+### 2. 管理接口（受 Zero Trust 或 Bearer Token 保护）
+
+- `GET /api/admin/me`：返回当前鉴权方式与登录邮箱
+- `GET /api/admin/notices`：获取全部公告（含未生效/已过期）
+- `POST /api/admin/notices`：新建公告
+- `PUT /api/admin/notices/:id`：更新公告
+- `DELETE /api/admin/notices/:id`：删除公告
+- `POST /api/admin/upload`：上传图片（`multipart/form-data` 字段 `file`，最大 5MB）

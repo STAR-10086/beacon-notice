@@ -90,9 +90,11 @@ function toDraft(n: NoticeRecord): NoticeDraft {
 }
 
 export default function App() {
-  const [apiUrl, setApiUrl] = useState(() => localStorage.getItem(STORAGE_URL_KEY) || 'https://notice.buct.one');
+  const [apiUrl, setApiUrl] = useState(() => localStorage.getItem(STORAGE_URL_KEY) || '');
   const [token, setToken] = useState(() => sessionStorage.getItem(STORAGE_TOKEN_KEY) || '');
   const [connected, setConnected] = useState(false);
+  const [authChecking, setAuthChecking] = useState(true);
+  const [authIdentity, setAuthIdentity] = useState('');
 
   const [notices, setNotices] = useState<NoticeRecord[]>([]);
   const [appFilter, setAppFilter] = useState('__all__');
@@ -108,11 +110,13 @@ export default function App() {
 
   async function apiFetch(path: string, init: RequestInit = {}) {
     const headers = new Headers(init.headers || {});
-    headers.set('Authorization', `Bearer ${token.trim()}`);
+    if (token.trim()) {
+      headers.set('Authorization', `Bearer ${token.trim()}`);
+    }
     if (!(init.body instanceof FormData) && !headers.has('Content-Type')) {
       headers.set('Content-Type', 'application/json');
     }
-    const resp = await fetch(`${cleanBase}${path}`, { ...init, headers });
+    const resp = await fetch(`${cleanBase}${path}`, { ...init, headers, credentials: 'same-origin' });
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok) {
       throw new Error(data.error || `HTTP ${resp.status}`);
@@ -120,31 +124,37 @@ export default function App() {
     return data;
   }
 
-  async function loadNotices(keepSelection = true) {
+  async function loadNotices(keepSelection = true, silent = false) {
     setBusy(true);
-    setStatusMsg(null);
+    if (!silent) setStatusMsg(null);
     try {
-      const data = await apiFetch('/api/admin/notices');
+      const [meData, data] = await Promise.all([
+        apiFetch('/api/admin/me').catch(() => ({ identity: '' })),
+        apiFetch('/api/admin/notices')
+      ]);
       const list: NoticeRecord[] = data.notices || [];
       setNotices(list);
       setConnected(true);
-      localStorage.setItem(STORAGE_URL_KEY, cleanBase);
-      sessionStorage.setItem(STORAGE_TOKEN_KEY, token.trim());
+      setAuthIdentity(meData.identity || '');
+      if (cleanBase) localStorage.setItem(STORAGE_URL_KEY, cleanBase);
+      else localStorage.removeItem(STORAGE_URL_KEY);
+      if (token.trim()) sessionStorage.setItem(STORAGE_TOKEN_KEY, token.trim());
       if (!keepSelection && list.length > 0) {
         setDraft(toDraft(list[0]));
       }
     } catch (err: any) {
-      setStatusMsg({ text: err.message || '连接失败', error: true });
+      if (!silent) {
+        setStatusMsg({ text: err.message || '连接失败', error: true });
+      }
       setConnected(false);
     } finally {
       setBusy(false);
+      setAuthChecking(false);
     }
   }
 
   useEffect(() => {
-    if (token.trim()) {
-      loadNotices(false);
-    }
+    loadNotices(false, true);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -254,23 +264,34 @@ export default function App() {
     }
   }
 
+  if (authChecking) {
+    return (
+      <div className="auth-shell">
+        <div className="auth-card">
+          <h1>Beacon Notice · 公告管理台</h1>
+          <p className="muted">正在检查 Zero Trust / 会话状态…</p>
+        </div>
+      </div>
+    );
+  }
+
   if (!connected) {
     return (
       <div className="auth-shell">
         <div className="auth-card">
           <h1>Beacon Notice · 公告管理台</h1>
-          <p className="muted">轻量多应用 Markdown 与图文公告服务，支持按 App ID 与版本号投放。</p>
+          <p className="muted">通过 Cloudflare Zero Trust 免密进入；若本地调试或未开启 Zero Trust，可输入 ADMIN_TOKEN。</p>
           <div className="field">
-            <label>后端服务地址</label>
+            <label>后端服务地址（同域部署留空即可）</label>
             <input
               className="input"
               value={apiUrl}
               onChange={(e) => setApiUrl(e.target.value)}
-              placeholder="https://notice.buct.one"
+              placeholder="同域留空（或 https://notice.buct.one）"
             />
           </div>
           <div className="field">
-            <label>管理员密钥（ADMIN_TOKEN）</label>
+            <label>管理员密钥（ADMIN_TOKEN，可选）</label>
             <input
               className="input"
               type="password"
@@ -283,7 +304,7 @@ export default function App() {
           {statusMsg && (
             <div className={`status-bar ${statusMsg.error ? 'error' : ''}`}>{statusMsg.text}</div>
           )}
-          <button className="btn primary" disabled={busy || !token.trim()} onClick={() => loadNotices(false)}>
+          <button className="btn primary" disabled={busy} onClick={() => loadNotices(false)}>
             {busy ? '正在连接…' : '连接并进入管理台'}
           </button>
         </div>
@@ -296,6 +317,9 @@ export default function App() {
       <header className="topbar">
         <div className="topbar-left">
           <strong>Beacon Notice · 多应用公告台</strong>
+          {authIdentity && (
+            <span className="badge">{authIdentity === 'token' ? 'Token 鉴权' : `Zero Trust · ${authIdentity}`}</span>
+          )}
           <select
             className="select"
             style={{ width: 'auto', minWidth: 160 }}

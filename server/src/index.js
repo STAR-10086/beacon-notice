@@ -7,15 +7,21 @@ const multer = require('multer');
 
 const PORT = Number(process.env.PORT || 3080);
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(__dirname, '..', 'data'));
+const PUBLIC_DIR = path.resolve(process.env.PUBLIC_DIR || path.join(__dirname, '..', 'public'));
 const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
 const NOTICES_FILE = path.join(DATA_DIR, 'notices.json');
 const ADMIN_TOKEN = (process.env.ADMIN_TOKEN || '').trim();
+const TRUST_CF_ACCESS = String(process.env.TRUST_CF_ACCESS || 'false').toLowerCase() === 'true';
+const CF_ACCESS_ALLOWED_EMAILS = String(process.env.CF_ACCESS_ALLOWED_EMAILS || '')
+  .split(',')
+  .map((s) => s.trim().toLowerCase())
+  .filter(Boolean);
 const PUBLIC_BASE_URL = (process.env.PUBLIC_BASE_URL || '').trim().replace(/\/+$/, '');
 const CORS_ORIGIN = (process.env.CORS_ORIGIN || '*').trim();
 const MAX_UPLOAD_BYTES = 5 * 1024 * 1024;
 
-if (!ADMIN_TOKEN) {
-  console.warn('[beacon-notice] WARNING: ADMIN_TOKEN is empty; all /api/admin/* endpoints will reject requests.');
+if (!ADMIN_TOKEN && !TRUST_CF_ACCESS) {
+  console.warn('[beacon-notice] WARNING: Neither ADMIN_TOKEN nor TRUST_CF_ACCESS is enabled; /api/admin/* will reject requests.');
 }
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -49,15 +55,30 @@ function constantTimeEquals(a, b) {
 }
 
 function requireAdmin(req, res, next) {
-  if (!ADMIN_TOKEN) {
-    return res.status(503).json({ error: 'Server ADMIN_TOKEN is not configured' });
+  if (TRUST_CF_ACCESS) {
+    const cfEmail = String(req.headers['cf-access-authenticated-user-email'] || '').trim().toLowerCase();
+    if (cfEmail) {
+      if (CF_ACCESS_ALLOWED_EMAILS.length === 0 || CF_ACCESS_ALLOWED_EMAILS.includes(cfEmail)) {
+        req.adminIdentity = cfEmail;
+        return next();
+      }
+      return res.status(403).json({ error: 'Forbidden: email not in CF_ACCESS_ALLOWED_EMAILS' });
+    }
   }
-  const auth = req.headers.authorization || '';
-  const token = auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
-  if (!token || !constantTimeEquals(token, ADMIN_TOKEN)) {
-    return res.status(401).json({ error: 'Unauthorized' });
+
+  if (ADMIN_TOKEN) {
+    const auth = req.headers.authorization || '';
+    const token = auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
+    if (token && constantTimeEquals(token, ADMIN_TOKEN)) {
+      req.adminIdentity = 'token';
+      return next();
+    }
   }
-  next();
+
+  if (!ADMIN_TOKEN && !TRUST_CF_ACCESS) {
+    return res.status(503).json({ error: 'Server auth is not configured' });
+  }
+  return res.status(401).json({ error: 'Unauthorized' });
 }
 
 const ALLOWED_EXT_BY_MIME = {
@@ -165,6 +186,14 @@ app.get('/api/notices', (req, res) => {
   res.json({ notices: list, serverTime: now });
 });
 
+app.get('/api/admin/me', requireAdmin, (req, res) => {
+  res.json({
+    ok: true,
+    identity: req.adminIdentity || 'unknown',
+    mode: req.adminIdentity === 'token' ? 'token' : 'zero-trust'
+  });
+});
+
 app.get('/api/admin/apps', requireAdmin, (_req, res) => {
   const notices = readNotices();
   const counts = new Map();
@@ -268,6 +297,14 @@ app.post('/api/admin/upload', requireAdmin, upload.single('file'), (req, res) =>
     size: req.file.size
   });
 });
+
+if (fs.existsSync(PUBLIC_DIR)) {
+  app.get('/', (_req, res) => res.redirect(302, '/admin/'));
+  app.use('/admin', express.static(PUBLIC_DIR, { index: 'index.html' }));
+  app.get('/admin/*', (_req, res) => {
+    res.sendFile(path.join(PUBLIC_DIR, 'index.html'));
+  });
+}
 
 app.use((err, _req, res, _next) => {
   res.status(400).json({ error: err.message || 'Request failed' });
