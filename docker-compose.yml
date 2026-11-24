@@ -1,0 +1,17 @@
+services:
+  beacon-notice:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    container_name: beacon-notice
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:3080:3080"
+    environment:
+      PORT: 3080
+      DATA_DIR: /data
+      ADMIN_TOKEN: ${ADMIN_TOKEN}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL}
+      CORS_ORIGIN: ${CORS_ORIGIN:-*}
+    volumes:
+      - ./data:/data
